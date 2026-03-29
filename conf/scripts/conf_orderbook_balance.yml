@@ -1,0 +1,24 @@
+script_file_name: orderbook_balance.py
+exchange: exchange_sim
+trading_pair: BTC-USDT
+
+# Fallback price when the orderbook has no data yet
+ref_price: 1000.0
+
+# Order sizing
+order_amount: 1.0         # Base size at level 1
+order_level_amount: 0.3   # Extra size per additional level
+order_levels: 10          # Number of levels per side
+
+# Spread configuration (as fractions, e.g. 0.0012 = 0.12%)
+bid_spread: 0.0012
+ask_spread: 0.0012
+order_level_spread: 0.0015
+
+# Rebalancing aggressiveness:
+#   0.0 = symmetric (ignores imbalance)
+#   1.0 = full skew (no orders on heavy side when completely one-sided)
+balance_factor: 1.0
+
+# Order refresh interval in seconds
+order_refresh_time: 5

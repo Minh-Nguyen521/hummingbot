@@ -188,8 +188,14 @@ class OrderCandidate:
     def _adjust_for_percent_fee_collateral(self, available_balances: Dict[str, Decimal]):
         if self.percent_fee_collateral is not None:
             token, amount = self.percent_fee_collateral
+            if amount.is_nan():
+                self._scale_order(Decimal("0"))
+                return
             if token == self.order_collateral.token:
                 amount += self.order_collateral.amount
+            if amount.is_nan():
+                self._scale_order(Decimal("0"))
+                return
             if available_balances[token] < amount:
                 scaler = available_balances[token] / amount
                 self._scale_order(scaler)

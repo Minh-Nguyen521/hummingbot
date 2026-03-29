@@ -615,6 +615,11 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
 
                     self.filter_out_takers(proposal)
                     self.logger().debug(f"Proposals after takers filter: {proposal}")
+                    if len(proposal.buys) == 0 and len(proposal.sells) == 0:
+                        self.logger().info(
+                            f"No executable proposal generated for {self.trading_pair}. "
+                            f"ref_price={self.get_price()} active_orders={len(self.active_orders)}"
+                        )
 
                 self.cancel_active_orders(proposal)
                 self.cancel_orders_below_min_spread()
@@ -852,7 +857,7 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
                         price = market.quantize_order_price(self.trading_pair, price)
                         size = Decimal(str(value[2]))
                         size = market.quantize_order_amount(self.trading_pair, size)
-                        if size > 0 and price > 0:
+                        if size > 0 and not price.is_nan() and price > 0:
                             buys.append(PriceSize(price, size))
                     elif str(value[0]) == "sell":
                         price = self.get_price() * (
@@ -861,7 +866,7 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
                         price = market.quantize_order_price(self.trading_pair, price)
                         size = Decimal(str(value[2]))
                         size = market.quantize_order_amount(self.trading_pair, size)
-                        if size > 0 and price > 0:
+                        if size > 0 and not price.is_nan() and price > 0:
                             sells.append(PriceSize(price, size))
         else:
             for level in range(0, self._buy_levels):
@@ -871,7 +876,7 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
                 price = market.quantize_order_price(self.trading_pair, price)
                 size = self._order_amount + (self._order_level_amount * level)
                 size = market.quantize_order_amount(self.trading_pair, size)
-                if size > 0:
+                if size > 0 and not price.is_nan() and price > 0:
                     buys.append(PriceSize(price, size))
             for level in range(0, self._sell_levels):
                 price = self.get_price() * (
@@ -880,7 +885,7 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
                 price = market.quantize_order_price(self.trading_pair, price)
                 size = self._order_amount + (self._order_level_amount * level)
                 size = market.quantize_order_amount(self.trading_pair, size)
-                if size > 0:
+                if size > 0 and not price.is_nan() and price > 0:
                     sells.append(PriceSize(price, size))
 
         return Proposal(buys, sells)

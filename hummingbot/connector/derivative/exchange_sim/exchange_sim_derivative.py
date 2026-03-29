@@ -26,6 +26,7 @@ from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativ
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.core.data_type.common import (
     OrderType,
+    PriceType,
     PositionAction,
     PositionMode,
     PositionSide,
@@ -67,6 +68,7 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
         trading_pairs: Optional[List[str]] = None,
         trading_required: bool = True,
         domain: str = DEFAULT_DOMAIN,
+        exchange_sim_ref_price: Optional[Decimal] = None,
     ):
         self._account_id = exchange_sim_account_id
         self._domain = domain
@@ -74,6 +76,7 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
         self._trading_pairs = trading_pairs or []
         self._position_mode = None
         self._account_initialized = False
+        self._ref_price = exchange_sim_ref_price
         # Fallback price used when one or both sides of the orderbook are empty.
         # Updated from every trade and BBO event so it stays fresh.
         self._last_known_price: Dict[str, Decimal] = {}
@@ -145,17 +148,29 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
     def supported_position_modes(self) -> List[PositionMode]:
         return [PositionMode.ONEWAY]
 
-    # Half-spread applied when only one side of the book exists (0.1%)
-    _ONE_SIDE_HALF_SPREAD = Decimal("0.001")
+    # Half-spread applied when only one side of the book exists (0.01%)
+    _ONE_SIDE_HALF_SPREAD = Decimal("0.0001")
+    # When the real BBO spread exceeds this fraction, clamp to mid ± _ONE_SIDE_HALF_SPREAD
+    # instead of returning the raw wide BBO (e.g. 0.002 = 0.2% max spread)
+    _MAX_BBO_SPREAD = Decimal("0.002")
+
+    def _fallback_reference_price(self, trading_pair: str) -> Decimal:
+        ref = self._last_known_price.get(trading_pair)
+        if ref is not None and not ref.is_nan() and ref > 0:
+            return ref
+        if self._ref_price is not None and self._ref_price > 0:
+            return self._ref_price
+        return Decimal("nan")
 
     def get_price(self, trading_pair: str, is_buy: bool) -> Decimal:
         """Return best ask (is_buy=True) or best bid (is_buy=False).
 
         Fallback hierarchy when the requested side is empty:
-        1. Real BBO price (normal case).
+        1. Real BBO price — clamped to mid ± _ONE_SIDE_HALF_SPREAD if spread > _MAX_BBO_SPREAD.
         2. Use the opposite side ± full spread (_ONE_SIDE_HALF_SPREAD * 2).
         3. Use _last_known_price ± half-spread.
-        4. Return NaN (strategy will skip the tick).
+        4. Configured ref_price ± half-spread.
+        5. Return NaN (strategy will skip the tick).
 
         We probe the orderbook directly to avoid the noisy "Ask orderbook is empty"
         warning that fires on every call to super().get_price() when the side is empty.
@@ -183,7 +198,11 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
                 if has_ask and has_bid:
                     ask = super().get_price(trading_pair, True)
                     bid = super().get_price(trading_pair, False)
-                    self._last_known_price[trading_pair] = (ask + bid) / 2
+                    mid = (ask + bid) / 2
+                    self._last_known_price[trading_pair] = mid
+                    # Clamp wide BBO: if spread > threshold, return mid ± tiny offset
+                    if mid > 0 and (ask - bid) / mid > self._MAX_BBO_SPREAD:
+                        return mid * (1 + self._ONE_SIDE_HALF_SPREAD) if is_buy else mid * (1 - self._ONE_SIDE_HALF_SPREAD)
                 return price
 
         # Requested side is empty. Try the opposite side without triggering warning.
@@ -198,14 +217,32 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
                     return opposite * (1 - self._ONE_SIDE_HALF_SPREAD * 2)
 
         # Both sides empty. Fall back to last known trade price.
-        ref = self._last_known_price.get(trading_pair)
-        if ref is not None and not ref.is_nan() and ref > 0:
+        ref = self._fallback_reference_price(trading_pair)
+        if not ref.is_nan():
             if is_buy:
                 return ref * (1 + self._ONE_SIDE_HALF_SPREAD)
             else:
                 return ref * (1 - self._ONE_SIDE_HALF_SPREAD)
 
         return Decimal("nan")
+
+    def get_mid_price(self, trading_pair: str) -> Decimal:
+        bid = self.get_price(trading_pair, False)
+        ask = self.get_price(trading_pair, True)
+        if not bid.is_nan() and not ask.is_nan() and bid > 0 and ask > 0:
+            return (bid + ask) / Decimal("2")
+        return self._fallback_reference_price(trading_pair)
+
+    def get_price_by_type(self, trading_pair: str, price_type: PriceType) -> Decimal:
+        if price_type is PriceType.BestBid:
+            return self.get_price(trading_pair, False)
+        elif price_type is PriceType.BestAsk:
+            return self.get_price(trading_pair, True)
+        elif price_type is PriceType.MidPrice:
+            return self.get_mid_price(trading_pair)
+        elif price_type is PriceType.LastTrade:
+            return self._fallback_reference_price(trading_pair)
+        return super().get_price_by_type(trading_pair, price_type)
 
     def get_buy_collateral_token(self, trading_pair: str) -> str:
         return "USDT"

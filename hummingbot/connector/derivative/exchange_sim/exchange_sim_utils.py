@@ -1,4 +1,5 @@
 from decimal import Decimal
+from typing import Optional
 
 from pydantic import ConfigDict, Field, SecretStr
 
@@ -25,6 +26,15 @@ class ExchangeSimConfigMap(BaseConnectorConfigMap):
             "is_secure": False,
             "is_connect_key": True,
             "prompt_on_new": True,
+        }
+    )
+    exchange_sim_ref_price: Optional[Decimal] = Field(
+        default=Decimal("1000"),
+        json_schema_extra={
+            "prompt": "Enter a reference price to use when the orderbook has no data (leave blank to skip)",
+            "is_secure": False,
+            "is_connect_key": False,
+            "prompt_on_new": False,
         }
     )
     model_config = ConfigDict(title="exchange_sim")

@@ -101,3 +101,5 @@ coverage.xml
 .claude/
 .cursor/
 .agents/
+
+venv/
