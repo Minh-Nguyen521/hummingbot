@@ -17,18 +17,18 @@ DEFAULT_FEES = TradeFeeSchema(
 )
 
 
-class ExchangeSimConfigMap(BaseConnectorConfigMap):
-    connector: str = "exchange_sim"
-    exchange_sim_account_id: Optional[SecretStr] = Field(
-        default=None,
+class ExchangeSimShortConfigMap(BaseConnectorConfigMap):
+    connector: str = "exchange_sim_short"
+    exchange_sim_short_account_id: SecretStr = Field(
+        default=...,
         json_schema_extra={
-            "prompt": "Enter your exchange-sim account ID (leave blank to use dual-subaccount mode)",
+            "prompt": "Enter the short-leg exchange-sim account ID",
             "is_secure": False,
             "is_connect_key": True,
             "prompt_on_new": True,
         }
     )
-    exchange_sim_master_account_id: Optional[str] = Field(
+    exchange_sim_short_master_account_id: Optional[str] = Field(
         default=None,
         json_schema_extra={
             "prompt": "Enter the master account ID if this is a subaccount (leave blank to skip)",
@@ -37,7 +37,7 @@ class ExchangeSimConfigMap(BaseConnectorConfigMap):
             "prompt_on_new": False,
         }
     )
-    exchange_sim_ref_price: Optional[Decimal] = Field(
+    exchange_sim_short_ref_price: Optional[Decimal] = Field(
         default=Decimal("1000"),
         json_schema_extra={
             "prompt": "Enter a reference price to use when the orderbook has no data (leave blank to skip)",
@@ -46,25 +46,7 @@ class ExchangeSimConfigMap(BaseConnectorConfigMap):
             "prompt_on_new": False,
         }
     )
-    exchange_sim_long_account_id: Optional[str] = Field(
-        default=None,
-        json_schema_extra={
-            "prompt": "Enter the long-leg subaccount ID for dual-subaccount mode (leave blank to skip)",
-            "is_secure": False,
-            "is_connect_key": False,
-            "prompt_on_new": False,
-        }
-    )
-    exchange_sim_short_account_id: Optional[str] = Field(
-        default=None,
-        json_schema_extra={
-            "prompt": "Enter the short-leg subaccount ID for dual-subaccount mode (leave blank to skip)",
-            "is_secure": False,
-            "is_connect_key": False,
-            "prompt_on_new": False,
-        }
-    )
-    model_config = ConfigDict(title="exchange_sim")
+    model_config = ConfigDict(title="exchange_sim_short")
 
 
-KEYS = ExchangeSimConfigMap.model_construct()
+KEYS = ExchangeSimShortConfigMap.model_construct()

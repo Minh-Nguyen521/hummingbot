@@ -1,0 +1,42 @@
+############################################
+###   Hedge MM strategy config            ###
+############################################
+
+template_version: 1
+strategy: null
+
+# Connector and market parameters
+derivative: null
+market: null
+leverage: null
+
+# Base spread and ladder
+bid_spread: null
+ask_spread: null
+minimum_spread: null
+order_amount: null
+order_levels: null
+order_level_mode: null
+order_level_amount: null
+top_order_size_multiplier: null
+order_level_spread: null
+order_level_price_step: null
+
+# Order lifecycle
+order_refresh_time: null
+order_refresh_tolerance_pct: null
+filled_order_delay: null
+
+# Profit-taking and stop-loss
+long_profit_taking_spread: null
+short_profit_taking_spread: null
+stop_loss_spread: null
+stop_loss_slippage_buffer: null
+time_between_stop_loss_orders: null
+
+# Inventory rebalancing
+rebalance_enabled: null
+rebalance_size_diff_threshold: null
+rebalance_target_pnl_pct: null
+rebalance_heavy_side_size_mult: null
+rebalance_light_side_size_mult: null

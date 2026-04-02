@@ -31,6 +31,11 @@ def validate_derivative_position_mode(value: str) -> Optional[str]:
         return "Position mode can either be One-way or Hedge mode"
 
 
+def validate_allowed_position_side(value: str) -> Optional[str]:
+    if value not in ["long", "short", "both"]:
+        return "Allowed position side must be 'long', 'short', or 'both'"
+
+
 def order_amount_prompt() -> str:
     trading_pair = perpetual_market_making_config_map["market"].value
     base_asset, quote_asset = trading_pair.split("-")
@@ -321,4 +326,10 @@ perpetual_market_making_config_map = {
                   required_if=lambda: False,
                   default=None,
                   type_str="json"),
+    "allowed_position_side":
+        ConfigVar(key="allowed_position_side",
+                  prompt="Which side should this instance open positions on? (long/short/both) >>> ",
+                  type_str="str",
+                  default="both",
+                  validator=validate_allowed_position_side),
 }

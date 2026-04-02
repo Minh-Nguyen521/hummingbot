@@ -179,12 +179,14 @@ class ConnectorSetting(NamedTuple):
         params["trading_required"] = trading_required
         params["balance_asset_limit"] = balance_asset_limit
         if (
-            self.name == "exchange_sim"
+            self.name in ("exchange_sim", "exchange_sim_long", "exchange_sim_short")
             and self.config_keys is not None
             and not isinstance(self.config_keys, Dict)
-            and hasattr(self.config_keys, "exchange_sim_ref_price")
         ):
-            params["exchange_sim_ref_price"] = self.config_keys.exchange_sim_ref_price
+            for optional_field in ("ref_price", "master_account_id", "long_account_id", "short_account_id"):
+                attr_name = f"{self.name}_{optional_field}"
+                if hasattr(self.config_keys, attr_name):
+                    params[attr_name] = getattr(self.config_keys, attr_name)
         if (self.config_keys is not None
                 and type(self.config_keys) is not dict
                 and "receive_connector_configuration" in self.config_keys.__class__.model_fields

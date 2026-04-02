@@ -1,40 +1,41 @@
-# Core strategy settings
-template_version: 6
-strategy: perpetual_market_making
+template_version: 1
+strategy: hedge_mm
+
+# --- Connector (single exchange_sim with dual-subaccount config) ---
 derivative: exchange_sim
 market: BTC-USDT
 leverage: 10
-position_mode: One-way
 
-# Base Spreads (Distance of the 1st level)
+# --- Base spread and ladder ---
 bid_spread: 0.12
 ask_spread: 0.12
 minimum_spread: 0.04
+order_amount: 20.0
+order_levels: 100
+order_level_mode: absolute
+order_level_amount: 15
+top_order_size_multiplier: 0.5
+order_level_spread: 1
+order_level_price_step: 1
 
-# Level Scaling (The solution to your request)
-order_levels: 10
-order_amount: 1.0 # Size at Level 1
-order_level_amount: 0.3 # Incremental size increase per level
-order_level_spread: 0.15 # Increased to avoid "clumping"
-
-# Balancing Mechanics
-inventory_skew_enabled: true
-inventory_target_base_pct: 50
-inventory_range_multiplier: 0.5
-
-# Execution & Risk
+# --- Order lifecycle ---
 order_refresh_time: 1.0
 order_refresh_tolerance_pct: 0.05
 filled_order_delay: 1.0
-order_optimization_enabled: true
 
-# Profit/Loss settings
+# --- Profit-taking and stop-loss ---
 long_profit_taking_spread: 0.8
 short_profit_taking_spread: 0.8
 stop_loss_spread: 1.5
-time_between_stop_loss_orders: 10.0
 stop_loss_slippage_buffer: 0.1
+time_between_stop_loss_orders: 10.0
 
-# Synchronization
-ask_order_optimization_depth: 1.0
-bid_order_optimization_depth: 1.0
+# --- Inventory rebalancing ---
+rebalance_enabled: true
+# Trigger rebalance when |long_qty - short_qty| exceeds this
+rebalance_size_diff_threshold: 0.5
+# Minimum unrealized PnL% on heavy side before emitting a rebalance close
+rebalance_target_pnl_pct: 0.2
+# Entry-order size multipliers while imbalanced
+rebalance_heavy_side_size_mult: 0.9
+rebalance_light_side_size_mult: 1.1

@@ -88,6 +88,7 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
         minimum_spread: Decimal = Decimal(0),
         hb_app_notification: bool = False,
         order_override: Dict[str, List[str]] = {},
+        allowed_position_side: str = "both",
     ):
 
         if price_ceiling != s_decimal_neg_one and price_ceiling < price_floor:
@@ -147,6 +148,9 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
 
         self._position_mode_ready = False
         self._position_mode_not_ready_counter = 0
+        if allowed_position_side not in ("long", "short", "both"):
+            raise ValueError("allowed_position_side must be 'long', 'short', or 'both'")
+        self._allowed_position_side = allowed_position_side
 
     def all_markets_ready(self):
         return all([market.ready for market in self.active_markets])
@@ -887,6 +891,11 @@ class PerpetualMarketMakingStrategy(StrategyPyBase):
                 size = market.quantize_order_amount(self.trading_pair, size)
                 if size > 0 and not price.is_nan() and price > 0:
                     sells.append(PriceSize(price, size))
+
+        if self._allowed_position_side == "long":
+            sells = []
+        elif self._allowed_position_side == "short":
+            buys = []
 
         return Proposal(buys, sells)
 
