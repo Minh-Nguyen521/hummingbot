@@ -62,7 +62,7 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
     """
 
     DEFAULT_DOMAIN = "exchange_sim"
-    DEFAULT_ACCOUNT_BALANCE = Decimal("10000000")
+    DEFAULT_ACCOUNT_BALANCE = Decimal("100000000000")
     DEFAULT_ACCOUNT_LEVERAGE = 10
     DEFAULT_MAKER_FEE_BPS = 2
     DEFAULT_TAKER_FEE_BPS = 5
