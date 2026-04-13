@@ -137,6 +137,46 @@ class HedgeConfigMap(BaseStrategyConfigMap):
         description="Whether to automatically set the exchange position mode to one-way or hedge based  ratio.",
         json_schema_extra={"prompt": "Do you want to automatically set the exchange position mode to one-way or hedge based on the ratio [y/n]?"},
     )
+    news_risk_controls_enabled: bool = Field(
+        default=False,
+        description="Whether to apply simulation-news-aware hedge guardrails when the hedge connector supports them.",
+        json_schema_extra={"prompt": "Enable news-based hedge risk controls? (y/n)", "prompt_on_new": False},
+    )
+    news_pause_before_seconds: int = Field(
+        default=0,
+        description="Seconds before a qualifying news event during which hedge risk controls are active.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter the number of seconds to pause before qualifying news", "prompt_on_new": False},
+    )
+    news_pause_after_seconds: int = Field(
+        default=0,
+        description="Seconds after a qualifying news event during which hedge risk controls are active.",
+        ge=0,
+        json_schema_extra={"prompt": "Enter the number of seconds to pause after qualifying news", "prompt_on_new": False},
+    )
+    news_min_severity: Literal["low", "medium", "high", "critical"] = Field(
+        default="high",
+        description="Minimum simulation-news severity that activates hedge guardrails.",
+        json_schema_extra={"prompt": "Enter the minimum news severity for guardrails", "prompt_on_new": False},
+    )
+    news_reduce_order_size_multiplier: Decimal = Field(
+        default=Decimal("1"),
+        description="Multiplier applied to hedge order size during qualifying news windows.",
+        ge=0,
+        le=1,
+        json_schema_extra={"prompt": "Enter the hedge size multiplier during qualifying news", "prompt_on_new": False},
+    )
+    news_slippage_multiplier: Decimal = Field(
+        default=Decimal("1"),
+        description="Multiplier applied to hedge slippage during qualifying news windows.",
+        ge=1,
+        json_schema_extra={"prompt": "Enter the hedge slippage multiplier during qualifying news", "prompt_on_new": False},
+    )
+    news_disable_hedging_during_risk: bool = Field(
+        default=False,
+        description="Whether to pause new hedge orders entirely during qualifying news windows.",
+        json_schema_extra={"prompt": "Disable new hedging during qualifying news windows? (y/n)", "prompt_on_new": False},
+    )
     connector_0: market_config_map = get_field(0)
     connector_1: market_config_map = get_field(1)
     connector_2: market_config_map = get_field(2)

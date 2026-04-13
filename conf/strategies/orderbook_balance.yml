@@ -2,40 +2,45 @@ template_version: 1
 strategy: hedge_mm
 
 # --- Connector (single exchange_sim with dual-subaccount config) ---
-derivative: exchange_sim
-market: BTC-USDT
-leverage: 10
+derivative: exchange_sim # connector name; must match a registered derivative connector
+market: BTC-USDT # trading pair (BASE-QUOTE)
+leverage: 10 # position leverage applied to both legs
 
 # --- Base spread and ladder ---
-bid_spread: 0.12
-ask_spread: 0.12
-minimum_spread: 0.04
-order_amount: 20.0
-order_levels: 100
-order_level_mode: absolute
-order_level_amount: 15
-top_order_size_multiplier: 0.5
-order_level_spread: 1
-order_level_price_step: 1
+bid_spread: 0.12 # % distance below mid for the nearest buy order (level 0)
+ask_spread: 0.12 # % distance above mid for the nearest sell order (level 0)
+minimum_spread: 0.01 # orders closer than this % to mid are filtered out — must be < bid_spread/ask_spread
+order_amount: 15.0 # base size (BTC) of the nearest order at level 0
+order_levels: 100 # total number of price levels per side
+order_level_mode: absolute # how price steps between levels: "percent" = % per level, "absolute" = fixed price step
+order_level_amount:
+  1.0 # extra size (BTC) added per level — level N gets base_size + N*1 BTC
+  # Level 0 = 1 BTC, level 1 = 2.01 BTC, level 99 = 101 BTC (~101x pyramid)
+top_order_size_multiplier: 0.5 # fraction of order_amount for the nearest order; 0.5 = 50% at level 0, 100% at farthest level
+order_level_spread: 1 # (percent mode only) spread % added per level beyond level 0
+order_level_price_step: 1 # (absolute mode only) price step ($) between consecutive levels; 0.5 = $0.50 apart, 100 levels span ~$50
 
 # --- Order lifecycle ---
-order_refresh_time: 1.0
-order_refresh_tolerance_pct: 0.05
-filled_order_delay: 1.0
+order_refresh_time: 1.0 # seconds between order cancel-and-replace cycles
+order_refresh_tolerance_pct: 0.05 # skip refresh if all prices moved less than this % (avoids unnecessary cancels)
+filled_order_delay: 1.0 # seconds to wait before re-placing entry orders after a fill
 
 # --- Profit-taking and stop-loss ---
-long_profit_taking_spread: 0.8
-short_profit_taking_spread: 0.8
-stop_loss_spread: 1.5
-stop_loss_slippage_buffer: 0.1
-time_between_stop_loss_orders: 10.0
+long_profit_taking_spread: 0.8 # minimum PnL% required before closing a long position (close at current bid)
+short_profit_taking_spread: 0.8 # minimum PnL% required before closing a short position (close at current ask)
+stop_loss_spread: 1.5 # % loss from entry price that triggers a stop-loss close order
+stop_loss_slippage_buffer: 0.1 # additional % added to stop-loss price to improve fill probability
+time_between_stop_loss_orders: 10.0 # minimum seconds between consecutive close order placements (rate limit)
+
+# --- News integration ---
+news_pre_window_seconds: 2.0 # seconds before a news event to start shifting the reference price
+news_price_shift_pct: 0.1 # reference price shift per severity rank (low=0.1%, medium=0.2%, high=0.3%, critical=0.4%)
+news_flow_window_seconds: 30.0 # seconds after news publication to observe taker fill flow
+news_flow_skew_mult: 2.0 # max size multiplier on the skewed side when going against taker flow (1.0 = no skew)
 
 # --- Inventory rebalancing ---
 rebalance_enabled: true
-# Trigger rebalance when |long_qty - short_qty| exceeds this
-rebalance_size_diff_threshold: 0.5
-# Minimum unrealized PnL% on heavy side before emitting a rebalance close
-rebalance_target_pnl_pct: 0.2
-# Entry-order size multipliers while imbalanced
-rebalance_heavy_side_size_mult: 0.9
-rebalance_light_side_size_mult: 1.1
+rebalance_size_diff_threshold: 0.5 # trigger rebalance when |long_qty - short_qty| exceeds this (BTC)
+rebalance_target_pnl_pct: 0.2 # minimum unrealized PnL% on heavy side before emitting a rebalance close
+rebalance_heavy_side_size_mult: 0.9 # shrink entry sizes on the heavy side to slow accumulation
+rebalance_light_side_size_mult: 1.1 # grow entry sizes on the light side to speed up catch-up

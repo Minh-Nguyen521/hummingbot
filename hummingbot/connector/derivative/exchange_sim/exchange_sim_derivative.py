@@ -1,8 +1,9 @@
 # ExchangeSimDerivative connector implementation
 # Stub file - will be implemented with proper Hummingbot base class methods
 
+import asyncio
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from bidict import bidict
 
@@ -49,6 +50,9 @@ from hummingbot.core.data_type.user_stream_tracker_data_source import (
 from hummingbot.core.web_assistant.connections.data_types import RESTMethod
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 
+from .news_service import ExchangeSimNewsService
+from .news_types import NewsEvent
+
 
 class ExchangeSimDerivative(PerpetualDerivativePyBase):
     """ExchangeSimDerivative connector for Hummingbot perpetual futures trading.
@@ -80,6 +84,16 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
         domain: str = DEFAULT_DOMAIN,
         exchange_sim_ref_price: Optional[Decimal] = None,
         exchange_sim_master_account_id: Optional[str] = None,
+        exchange_sim_news_enabled: bool = False,
+        exchange_sim_news_poll_interval: int = 30,
+        exchange_sim_news_lookahead_window: int = 3600,
+        exchange_sim_news_replay_mode: bool = False,
+        exchange_sim_news_feed_path: Optional[str] = None,
+        exchange_sim_news_endpoint: str = "/api/v1/news",
+        exchange_sim_news_volatility_enabled: bool = False,
+        exchange_sim_news_impact_duration: int = 30,
+        exchange_sim_news_impact_multiplier: Decimal = Decimal("1"),
+        exchange_sim_news_spread_multiplier: Decimal = Decimal("2"),
     ):
         self._is_dual_mode = (
             exchange_sim_long_account_id is not None
@@ -104,6 +118,11 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
         self._account_initialized = False
         self._role_initialized: Dict[str, bool] = {}
         self._ref_price = exchange_sim_ref_price
+        self._news_enabled = exchange_sim_news_enabled
+        self._news_volatility_enabled = exchange_sim_news_volatility_enabled
+        self._news_impact_duration = float(exchange_sim_news_impact_duration)
+        self._news_impact_multiplier = Decimal(str(exchange_sim_news_impact_multiplier))
+        self._news_spread_multiplier = Decimal(str(exchange_sim_news_spread_multiplier))
         # Fallback price used when one or both sides of the orderbook are empty.
         self._last_known_price: Dict[str, Decimal] = {}
         # Per-role state for dual-subaccount mode.
@@ -117,10 +136,21 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
         self._role_available_balances: Dict[
             str, Dict[str, Decimal]
         ] = {}  # role → {asset → available}
+        self._news_polling_task: Optional[asyncio.Task] = None
 
         super().__init__(balance_asset_limit, rate_limits_share_pct)
         self._real_time_balance_update = False
         self._set_trading_pair_symbol_map(bidict())
+        self._news_service = ExchangeSimNewsService(
+            api_factory=self._web_assistants_factory,
+            enabled=exchange_sim_news_enabled,
+            news_feed_path=exchange_sim_news_feed_path,
+            news_endpoint=exchange_sim_news_endpoint,
+            poll_interval=float(exchange_sim_news_poll_interval),
+            lookahead_window=float(exchange_sim_news_lookahead_window),
+            replay_mode=exchange_sim_news_replay_mode,
+            domain=domain,
+        )
 
     # ------------------------------------------------------------------
     # Dual-account API
@@ -178,6 +208,7 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
     @property
     def status_dict(self) -> Dict[str, bool]:
         sd = super().status_dict
+        sd["news_initialized"] = self._news_service.initialized
         return sd
 
     @property
@@ -234,6 +265,12 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
     _ONE_SIDE_HALF_SPREAD = Decimal("0.0001")
     # When the real BBO spread exceeds this fraction, clamp to mid ± _ONE_SIDE_HALF_SPREAD
     _MAX_BBO_SPREAD = Decimal("0.002")
+    _NEWS_IMPACT_BY_SEVERITY = {
+        "low": Decimal("0.0005"),
+        "medium": Decimal("0.0015"),
+        "high": Decimal("0.0030"),
+        "critical": Decimal("0.0060"),
+    }
 
     def _fallback_reference_price(self, trading_pair: str) -> Decimal:
         ref = self._last_known_price.get(trading_pair)
@@ -242,6 +279,49 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
         if self._ref_price is not None and self._ref_price > 0:
             return self._ref_price
         return Decimal("nan")
+
+    def _sentiment_direction(self, event: NewsEvent) -> Decimal:
+        if event.sentiment == "positive":
+            return Decimal("1")
+        if event.sentiment == "negative":
+            return Decimal("-1")
+        return Decimal("0")
+
+    def _active_news_impact(self, trading_pair: str) -> Tuple[Decimal, Decimal]:
+        if not self._news_volatility_enabled:
+            return Decimal("0"), Decimal("1")
+        events = self.get_active_news(
+            symbols=[trading_pair],
+            before_seconds=0,
+            after_seconds=self._news_impact_duration,
+        )
+        if len(events) == 0:
+            return Decimal("0"), Decimal("1")
+
+        directional_shift = Decimal("0")
+        spread_multiplier = Decimal("1")
+        for event in events:
+            elapsed = max(0.0, self.current_timestamp - event.timestamp)
+            if self._news_impact_duration <= 0:
+                decay = Decimal("1")
+            else:
+                decay = Decimal(str(max(0.0, 1 - (elapsed / self._news_impact_duration))))
+            severity_impact = self._NEWS_IMPACT_BY_SEVERITY.get(event.severity, Decimal("0"))
+            impact = severity_impact * self._news_impact_multiplier * decay
+            directional_shift += self._sentiment_direction(event) * impact
+            if impact > 0:
+                spread_multiplier = max(spread_multiplier, Decimal("1") + ((self._news_spread_multiplier - 1) * decay))
+        return directional_shift, spread_multiplier
+
+    def _apply_news_impact_to_price(self, trading_pair: str, price: Decimal, is_buy: bool) -> Decimal:
+        if price.is_nan() or price <= 0:
+            return price
+        directional_shift, spread_multiplier = self._active_news_impact(trading_pair)
+        adjusted_price = price * (Decimal("1") + directional_shift)
+        if spread_multiplier > 1:
+            spread_half = (spread_multiplier - 1) * self._ONE_SIDE_HALF_SPREAD
+            adjusted_price *= Decimal("1") + spread_half if is_buy else Decimal("1") - spread_half
+        return adjusted_price
 
     def get_price(self, trading_pair: str, is_buy: bool) -> Decimal:
         """Return best ask (is_buy=True) or best bid (is_buy=False).
@@ -279,12 +359,13 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
                     mid = (ask + bid) / 2
                     self._last_known_price[trading_pair] = mid
                     if mid > 0 and (ask - bid) / mid > self._MAX_BBO_SPREAD:
-                        return (
+                        unclamped = (
                             mid * (1 + self._ONE_SIDE_HALF_SPREAD)
                             if is_buy
                             else mid * (1 - self._ONE_SIDE_HALF_SPREAD)
                         )
-                return price
+                        return self._apply_news_impact_to_price(trading_pair, unclamped, is_buy)
+                return self._apply_news_impact_to_price(trading_pair, price, is_buy)
 
         has_opposite = has_bid if is_buy else has_ask
         if has_opposite:
@@ -292,16 +373,20 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
             if not opposite.is_nan():
                 self._last_known_price[trading_pair] = opposite
                 if is_buy:
-                    return opposite * (1 + self._ONE_SIDE_HALF_SPREAD * 2)
+                    return self._apply_news_impact_to_price(
+                        trading_pair, opposite * (1 + self._ONE_SIDE_HALF_SPREAD * 2), is_buy
+                    )
                 else:
-                    return opposite * (1 - self._ONE_SIDE_HALF_SPREAD * 2)
+                    return self._apply_news_impact_to_price(
+                        trading_pair, opposite * (1 - self._ONE_SIDE_HALF_SPREAD * 2), is_buy
+                    )
 
         ref = self._fallback_reference_price(trading_pair)
         if not ref.is_nan():
             if is_buy:
-                return ref * (1 + self._ONE_SIDE_HALF_SPREAD)
+                return self._apply_news_impact_to_price(trading_pair, ref * (1 + self._ONE_SIDE_HALF_SPREAD), is_buy)
             else:
-                return ref * (1 - self._ONE_SIDE_HALF_SPREAD)
+                return self._apply_news_impact_to_price(trading_pair, ref * (1 - self._ONE_SIDE_HALF_SPREAD), is_buy)
 
         return Decimal("nan")
 
@@ -323,15 +408,80 @@ class ExchangeSimDerivative(PerpetualDerivativePyBase):
             return self._fallback_reference_price(trading_pair)
         return super().get_price_by_type(trading_pair, price_type)
 
+    def tick(self, timestamp: float):
+        super().tick(timestamp)
+        self._news_service.advance_time(timestamp)
+
     def get_buy_collateral_token(self, trading_pair: str) -> str:
         return "USDT"
 
     def get_sell_collateral_token(self, trading_pair: str) -> str:
         return "USDT"
 
+    async def start_network(self):
+        await super().start_network()
+        if self._news_enabled:
+            await self._news_service.refresh()
+            self._news_polling_task = asyncio.create_task(self._news_polling_loop())
+
+    async def stop_network(self):
+        if self._news_polling_task is not None:
+            self._news_polling_task.cancel()
+            try:
+                await self._news_polling_task
+            except asyncio.CancelledError:
+                pass
+            self._news_polling_task = None
+        await super().stop_network()
+
+    def subscribe_to_news(self, callback: Callable[[NewsEvent], None]) -> None:
+        self._news_service.subscribe(callback)
+
+    def unsubscribe_from_news(self, callback: Callable[[NewsEvent], None]) -> None:
+        self._news_service.unsubscribe(callback)
+
+    def get_upcoming_news(
+        self,
+        symbols: Optional[Sequence[str]] = None,
+        window_seconds: Optional[float] = None,
+    ) -> List[NewsEvent]:
+        return self._news_service.get_upcoming_events(
+            current_timestamp=self.current_timestamp,
+            window_seconds=window_seconds,
+            symbols=symbols,
+        )
+
+    def get_active_news(
+        self,
+        symbols: Optional[Sequence[str]] = None,
+        before_seconds: float = 0,
+        after_seconds: float = 0,
+        min_severity: Optional[str] = None,
+    ) -> List[NewsEvent]:
+        return self._news_service.get_active_events(
+            current_timestamp=self.current_timestamp,
+            before_seconds=before_seconds,
+            after_seconds=after_seconds,
+            symbols=symbols,
+            min_severity=min_severity,
+        )
+
+    def get_latest_news(self, symbol: Optional[str] = None) -> Optional[NewsEvent]:
+        return self._news_service.get_latest_event(symbol=symbol)
+
     async def _api_request(self, *args, **kwargs):
         kwargs.setdefault("limit_id", CONSTANTS.DEFAULT_LIMIT_ID)
         return await super()._api_request(*args, **kwargs)
+
+    async def _news_polling_loop(self):
+        while True:
+            try:
+                await self._news_service.refresh()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger().warning("Unexpected error refreshing exchange_sim news feed.", exc_info=True)
+            await asyncio.sleep(self._news_service.poll_interval)
 
     @staticmethod
     def _is_account_missing_error(exception: Exception) -> bool:

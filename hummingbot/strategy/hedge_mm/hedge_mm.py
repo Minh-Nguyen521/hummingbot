@@ -86,6 +86,10 @@ class HedgeMMStrategy(StrategyPyBase):
         rebalance_target_pnl_pct: Decimal = Decimal("0.005"),
         rebalance_heavy_side_size_mult: Decimal = Decimal("0.5"),
         rebalance_light_side_size_mult: Decimal = Decimal("1.5"),
+        news_pre_window_seconds: float = 2.0,
+        news_price_shift_pct: Decimal = Decimal("0.001"),
+        news_flow_window_seconds: float = 30.0,
+        news_flow_skew_mult: Decimal = Decimal("2.0"),
         logging_options: int = OPTION_LOG_ALL,
         status_report_interval: float = 900,
         hb_app_notification: bool = False,
@@ -119,6 +123,17 @@ class HedgeMMStrategy(StrategyPyBase):
         self._rebalance_target_pnl_pct = rebalance_target_pnl_pct
         self._rebalance_heavy_side_size_mult = rebalance_heavy_side_size_mult
         self._rebalance_light_side_size_mult = rebalance_light_side_size_mult
+        self._news_pre_window_seconds = news_pre_window_seconds
+        self._news_price_shift_pct = news_price_shift_pct
+        self._news_flow_window_seconds = news_flow_window_seconds
+        self._news_flow_skew_mult = news_flow_skew_mult
+        self._news_price_shift = Decimal("0")
+        self._news_active_event_id: Optional[str] = None
+        self._news_event_timestamp: float = 0.0
+        self._news_flow_buy_qty = Decimal("0")
+        self._news_flow_sell_qty = Decimal("0")
+        self._news_long_skew = Decimal("1")
+        self._news_short_skew = Decimal("1")
         self._logging_options = logging_options
         self._status_report_interval = status_report_interval
         self._hb_app_notification = hb_app_notification
@@ -176,6 +191,8 @@ class HedgeMMStrategy(StrategyPyBase):
         tp = self._long_leg.market_info.trading_pair
         market.set_leverage(tp, self._leverage)
         market.set_position_mode(PositionMode.ONEWAY)
+        if hasattr(market, "subscribe_to_news"):
+            market.subscribe_to_news(self._on_news_event)
 
     def tick(self, timestamp: float):
         if not self._all_markets_ready:
@@ -210,6 +227,8 @@ class HedgeMMStrategy(StrategyPyBase):
                 self.logger().warning(
                     "WARNING: Some markets are not connected. Market making may be dangerous."
                 )
+
+        self._update_news_state(timestamp)
 
         long_pos = self._get_position(self._long_leg)
         short_pos = self._get_position(self._short_leg)
@@ -248,6 +267,7 @@ class HedgeMMStrategy(StrategyPyBase):
             return
 
         self._apply_rebalance_size_skew(proposal, leg, diff)
+        self._apply_news_flow_skew(proposal, leg)
         self._apply_min_spread_filter(proposal, leg)
 
         defer = self._should_defer_cancel(leg, active_entry_orders, proposal)
@@ -318,23 +338,41 @@ class HedgeMMStrategy(StrategyPyBase):
         if ref.is_nan() or ref <= 0:
             return None
 
-        buys: List[PriceSize] = []
-        sells: List[PriceSize] = []
-
-        if leg.is_long:
-            for level in range(self._order_levels):
-                price = market.quantize_order_price(tp, self._entry_price_for_level(leg, ref, level))
-                size = market.quantize_order_amount(tp, self._size_for_level(level))
-                if size > 0 and not price.is_nan() and price > 0:
-                    buys.append(PriceSize(price, size))
-        else:
-            for level in range(self._order_levels):
-                price = market.quantize_order_price(tp, self._entry_price_for_level(leg, ref, level))
-                size = market.quantize_order_amount(tp, self._size_for_level(level))
-                if size > 0 and not price.is_nan() and price > 0:
-                    sells.append(PriceSize(price, size))
+        buys: List[PriceSize] = self._build_distinct_levels(leg, ref, is_buy=True) if leg.is_long else []
+        sells: List[PriceSize] = self._build_distinct_levels(leg, ref, is_buy=False) if not leg.is_long else []
 
         return Proposal(buys, sells)
+
+    def _build_distinct_levels(self, leg: LegState, ref: Decimal, is_buy: bool) -> List[PriceSize]:
+        market: DerivativeBase = leg.market_info.market
+        tp = leg.market_info.trading_pair
+        levels: List[PriceSize] = []
+        seen_prices = set()
+        level_index = 0
+        max_attempts = max(self._order_levels * 20, self._order_levels + 10)
+
+        while len(levels) < self._order_levels and level_index < max_attempts:
+            raw_price = self._entry_price_for_level(leg, ref, level_index)
+            price = market.quantize_order_price(tp, raw_price)
+            size = market.quantize_order_amount(tp, self._size_for_level(level_index))
+            level_index += 1
+
+            if size <= 0 or price.is_nan() or price <= 0:
+                continue
+            if price in seen_prices:
+                continue
+
+            seen_prices.add(price)
+            levels.append(PriceSize(price, size))
+
+        if len(levels) < self._order_levels:
+            side = "buy" if is_buy else "sell"
+            self.logger().warning(
+                f"Only generated {len(levels)} distinct {side} levels out of requested {self._order_levels}. "
+                f"Check tick size and order spacing."
+            )
+
+        return levels
 
     def _entry_price_for_level(self, leg: LegState, ref: Decimal, level: int) -> Decimal:
         level_offset = Decimal(level)
@@ -365,14 +403,18 @@ class HedgeMMStrategy(StrategyPyBase):
         bid = market.get_price(tp, False)
         ask = market.get_price(tp, True)
         if not bid.is_nan() and not ask.is_nan() and bid > 0 and ask > 0:
-            return (bid + ask) / Decimal("2")
-        if not bid.is_nan() and bid > 0:
-            return bid
-        if not ask.is_nan() and ask > 0:
-            return ask
-        if hasattr(market, "_fallback_reference_price"):
-            return market._fallback_reference_price(tp)
-        return Decimal("nan")
+            ref = (bid + ask) / Decimal("2")
+        elif not bid.is_nan() and bid > 0:
+            ref = bid
+        elif not ask.is_nan() and ask > 0:
+            ref = ask
+        elif hasattr(market, "_fallback_reference_price"):
+            ref = market._fallback_reference_price(tp)
+        else:
+            return Decimal("nan")
+        if self._news_price_shift != Decimal("0"):
+            ref = ref * (Decimal("1") + self._news_price_shift)
+        return ref
 
     def _apply_rebalance_size_skew(self, proposal: Proposal, leg: LegState, diff: Decimal):
         if not self._rebalance_enabled or abs(diff) <= self._rebalance_size_diff_threshold:
@@ -382,6 +424,16 @@ class HedgeMMStrategy(StrategyPyBase):
         else:  # short is heavier
             mult = self._rebalance_light_side_size_mult if leg.is_long else self._rebalance_heavy_side_size_mult
 
+        market: DerivativeBase = leg.market_info.market
+        tp = leg.market_info.trading_pair
+        for order in proposal.buys + proposal.sells:
+            order.size = market.quantize_order_amount(tp, order.size * mult)
+
+    def _apply_news_flow_skew(self, proposal: Proposal, leg: LegState) -> None:
+        """Scale entry order sizes based on post-news order flow imbalance."""
+        mult = self._news_long_skew if leg.is_long else self._news_short_skew
+        if mult == Decimal("1"):
+            return
         market: DerivativeBase = leg.market_info.market
         tp = leg.market_info.trading_pair
         for order in proposal.buys + proposal.sells:
@@ -485,8 +537,129 @@ class HedgeMMStrategy(StrategyPyBase):
         leg.cancel_ts = self.current_timestamp + self._order_refresh_time
 
     # ------------------------------------------------------------------
+    # News state management
+    # ------------------------------------------------------------------
+
+    def _on_news_event(self, event) -> None:
+        """Fired by connector when a news event becomes public.
+
+        Resets per-event fill counters so we can observe taker flow direction
+        after the news is released and skew entry sizes toward the opposite side.
+        """
+        tp = self._long_leg.market_info.trading_pair
+        if not event.affects_symbol(tp):
+            return
+        self._news_active_event_id = event.id
+        self._news_event_timestamp = event.timestamp
+        self._news_flow_buy_qty = Decimal("0")
+        self._news_flow_sell_qty = Decimal("0")
+        self._news_long_skew = Decimal("1")
+        self._news_short_skew = Decimal("1")
+        self.logger().info(
+            f"[News] Event published: '{event.title}'  "
+            f"sentiment={event.sentiment}  severity={event.severity}. "
+            f"Tracking fill flow for {self._news_flow_window_seconds}s."
+        )
+
+    def _update_news_state(self, timestamp: float) -> None:
+        """Called every tick to update price shift and flow skew from news."""
+        market = self._long_leg.market_info.market
+        tp = self._long_leg.market_info.trading_pair
+
+        # Phase 1 — pre-news price shift: 2 s before event fires, move ref price
+        # in the direction the news implies so we front-run the expected move.
+        if hasattr(market, "get_active_news"):
+            upcoming = market.get_active_news(
+                symbols=[tp],
+                before_seconds=self._news_pre_window_seconds,
+                after_seconds=0,
+            )
+            pre_events = [e for e in upcoming if e.timestamp > timestamp]
+            if pre_events:
+                event = max(pre_events, key=lambda e: e.severity_rank)
+                shift = self._news_price_shift_pct * Decimal(str(event.severity_rank))
+                if event.sentiment == "positive":
+                    self._news_price_shift = shift
+                elif event.sentiment == "negative":
+                    self._news_price_shift = -shift
+                else:
+                    self._news_price_shift = Decimal("0")
+            else:
+                self._news_price_shift = Decimal("0")
+        else:
+            self._news_price_shift = Decimal("0")
+
+        # Phase 2 — post-news flow skew: observe which side fills more and
+        # increase order sizes on the opposite side (go against taker flow).
+        if self._news_active_event_id is None:
+            return
+        if timestamp > self._news_event_timestamp + self._news_flow_window_seconds:
+            self.logger().info("[News] Flow observation window expired — resetting skew.")
+            self._news_active_event_id = None
+            self._news_long_skew = Decimal("1")
+            self._news_short_skew = Decimal("1")
+            return
+        total = self._news_flow_buy_qty + self._news_flow_sell_qty
+        if total <= 0:
+            return
+        max_mult = self._news_flow_skew_mult
+        if self._news_flow_sell_qty > self._news_flow_buy_qty:
+            # More sell-order fills → bearish taker flow → skew long (buy more)
+            imbalance = (self._news_flow_sell_qty - self._news_flow_buy_qty) / total
+            self._news_long_skew = Decimal("1") + imbalance * (max_mult - Decimal("1"))
+            self._news_short_skew = Decimal("1")
+        elif self._news_flow_buy_qty > self._news_flow_sell_qty:
+            # More buy-order fills → bullish taker flow → skew short (sell more)
+            imbalance = (self._news_flow_buy_qty - self._news_flow_sell_qty) / total
+            self._news_long_skew = Decimal("1")
+            self._news_short_skew = Decimal("1") + imbalance * (max_mult - Decimal("1"))
+        else:
+            self._news_long_skew = Decimal("1")
+            self._news_short_skew = Decimal("1")
+
+    # ------------------------------------------------------------------
     # Exit management
     # ------------------------------------------------------------------
+
+    def _find_non_mm_bid(self, leg: LegState, active_orders: List[LimitOrder]) -> Optional[Decimal]:
+        """Best bid in the orderbook that is NOT one of this leg's own MM entry prices.
+
+        This is used for long profit-taking so the close sell order fills against a real
+        noise-trader buyer rather than bouncing against the MM's own entry buy orders.
+        """
+        mm_prices = frozenset(
+            Decimal(str(o.price)) for o in active_orders
+            if o.is_buy and o.client_order_id in leg.entry_orders
+        )
+        try:
+            ob = leg.market_info.market.get_order_book(leg.market_info.trading_pair)
+            for level in ob.bid_entries():
+                price = Decimal(str(level.price))
+                if price not in mm_prices:
+                    return price
+        except Exception:
+            pass
+        return None
+
+    def _find_non_mm_ask(self, leg: LegState, active_orders: List[LimitOrder]) -> Optional[Decimal]:
+        """Best ask in the orderbook that is NOT one of this leg's own MM entry prices.
+
+        Used for short profit-taking so the close buy fills against a real noise-trader
+        seller rather than sitting at the MM's own ask level.
+        """
+        mm_prices = frozenset(
+            Decimal(str(o.price)) for o in active_orders
+            if not o.is_buy and o.client_order_id in leg.entry_orders
+        )
+        try:
+            ob = leg.market_info.market.get_order_book(leg.market_info.trading_pair)
+            for level in ob.ask_entries():
+                price = Decimal(str(level.price))
+                if price not in mm_prices:
+                    return price
+        except Exception:
+            pass
+        return None
 
     def _manage_leg_exit(self, leg: LegState, position: Position, diff: Decimal):
         market: DerivativeBase = leg.market_info.market
@@ -534,13 +707,15 @@ class HedgeMMStrategy(StrategyPyBase):
                 self._emit_close_sell(leg, size, rebalance_price, active_orders)
                 return
 
-        # Normal profit-taking: close at current bid once profit threshold is reached.
-        # profit_taking_spread is the minimum PnL% required before closing.
-        # Placing at the current bid keeps the order visible at the BBO.
+        # Normal profit-taking: close at the best non-MM bid so the order fills against
+        # a real noise-trader buyer rather than the MM's own entry orders.
+        # Falls back to the BBO bid if no non-MM price is found.
         if self._long_profit_taking_spread > 0 and entry > 0:
-            pnl_pct = (bid - entry) / entry
+            non_mm_bid = self._find_non_mm_bid(leg, active_orders)
+            close_bid = non_mm_bid if non_mm_bid is not None else bid
+            pnl_pct = (close_bid - entry) / entry
             if pnl_pct >= self._long_profit_taking_spread:
-                tp_price = market.quantize_order_price(tp, bid)
+                tp_price = market.quantize_order_price(tp, close_bid)
                 self._emit_close_sell(leg, size, tp_price, active_orders)
 
         # Stop-loss: bid has fallen to or below the stop price.
@@ -579,13 +754,15 @@ class HedgeMMStrategy(StrategyPyBase):
                 self._emit_close_buy(leg, size, rebalance_price, active_orders)
                 return
 
-        # Normal profit-taking: close at current ask once profit threshold is reached.
-        # profit_taking_spread is the minimum PnL% required before closing.
-        # Placing at the current ask keeps the order visible at the BBO.
+        # Normal profit-taking: close at the best non-MM ask so the order fills against
+        # a real noise-trader seller rather than the MM's own entry orders.
+        # Falls back to the BBO ask if no non-MM price is found.
         if self._short_profit_taking_spread > 0 and entry > 0:
-            pnl_pct = (entry - ask) / entry
+            non_mm_ask = self._find_non_mm_ask(leg, active_orders)
+            close_ask = non_mm_ask if non_mm_ask is not None else ask
+            pnl_pct = (entry - close_ask) / entry
             if pnl_pct >= self._short_profit_taking_spread:
-                tp_price = market.quantize_order_price(tp, ask)
+                tp_price = market.quantize_order_price(tp, close_ask)
                 self._emit_close_buy(leg, size, tp_price, active_orders)
 
         # Stop-loss: ask has risen to or above the stop price.
@@ -730,6 +907,8 @@ class HedgeMMStrategy(StrategyPyBase):
                 self.logger().info(
                     f"({'Long' if leg.is_long else 'Short'} leg) Buy order {oid} filled."
                 )
+                if oid in leg.entry_orders and self._news_active_event_id is not None:
+                    self._news_flow_buy_qty += Decimal(str(event.base_asset_amount))
                 break
 
     def did_complete_sell_order(self, event: SellOrderCompletedEvent):
@@ -741,6 +920,8 @@ class HedgeMMStrategy(StrategyPyBase):
                 self.logger().info(
                     f"({'Long' if leg.is_long else 'Short'} leg) Sell order {oid} filled."
                 )
+                if oid in leg.entry_orders and self._news_active_event_id is not None:
+                    self._news_flow_sell_qty += Decimal(str(event.base_asset_amount))
                 break
 
     # ------------------------------------------------------------------
@@ -749,7 +930,16 @@ class HedgeMMStrategy(StrategyPyBase):
 
     def format_status(self) -> str:
         if not self._all_markets_ready:
-            return "Market connectors are not ready."
+            market = self._long_leg.market_info.market
+            sd = getattr(market, "status_dict", {})
+            not_ready = [k for k, v in sd.items() if not v]
+            return f"Market connectors are not ready. Waiting on: {not_ready}"
+        if not self._position_mode_ready:
+            return (
+                f"Waiting for position mode ONEWAY confirmation "
+                f"({self._position_mode_success_count}/{len(self.active_markets)}). "
+                f"Retry counter: {self._position_mode_not_ready_counter}/10."
+            )
         lines = []
 
         long_pos = self._get_position(self._long_leg)
@@ -763,6 +953,19 @@ class HedgeMMStrategy(StrategyPyBase):
         lines.append(f"    Long  qty : {long_qty}")
         lines.append(f"    Short qty : {short_qty}")
         lines.append(f"    Diff      : {diff:+.4f}  ({'BALANCED' if abs(diff) <= self._rebalance_size_diff_threshold else 'REBALANCING'})")
+
+        if self._news_price_shift != Decimal("0") or self._news_active_event_id is not None:
+            lines.append("")
+            lines.append("  News state:")
+            if self._news_price_shift != Decimal("0"):
+                direction = "UP" if self._news_price_shift > 0 else "DOWN"
+                lines.append(f"    Price shift  : {self._news_price_shift * 100:+.3f}% ({direction})")
+            if self._news_active_event_id is not None:
+                lines.append(f"    Active event : {self._news_active_event_id}")
+                lines.append(f"    Flow buys    : {self._news_flow_buy_qty:.4f}")
+                lines.append(f"    Flow sells   : {self._news_flow_sell_qty:.4f}")
+                lines.append(f"    Long skew    : {self._news_long_skew:.3f}x")
+                lines.append(f"    Short skew   : {self._news_short_skew:.3f}x")
 
         for label, leg in (("Long", self._long_leg), ("Short", self._short_leg)):
             active = self._active_orders(leg)

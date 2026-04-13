@@ -220,4 +220,33 @@ hedge_mm_config_map = {
                   type_str="decimal",
                   default=Decimal("1.5"),
                   validator=lambda v: validate_decimal(v, 0, 10, inclusive=False)),
+    # News parameters
+    "news_pre_window_seconds":
+        ConfigVar(key="news_pre_window_seconds",
+                  prompt="Seconds before news publication to start shifting reference price >>> ",
+                  required_if=lambda: False,
+                  type_str="float",
+                  default=2.0,
+                  validator=lambda v: validate_decimal(v, min_value=0, inclusive=True)),
+    "news_price_shift_pct":
+        ConfigVar(key="news_price_shift_pct",
+                  prompt="Reference price shift per news severity rank (Enter 0.1 for 0.1%) >>> ",
+                  required_if=lambda: False,
+                  type_str="decimal",
+                  default=Decimal("0.1"),
+                  validator=lambda v: validate_decimal(v, 0, 10, inclusive=False)),
+    "news_flow_window_seconds":
+        ConfigVar(key="news_flow_window_seconds",
+                  prompt="Seconds after news publication to observe fill flow >>> ",
+                  required_if=lambda: False,
+                  type_str="float",
+                  default=30.0,
+                  validator=lambda v: validate_decimal(v, min_value=0, inclusive=False)),
+    "news_flow_skew_mult":
+        ConfigVar(key="news_flow_skew_mult",
+                  prompt="Max size multiplier when skewing against post-news taker flow >>> ",
+                  required_if=lambda: False,
+                  type_str="decimal",
+                  default=Decimal("2.0"),
+                  validator=lambda v: validate_decimal(v, 1, 10, inclusive=False)),
 }

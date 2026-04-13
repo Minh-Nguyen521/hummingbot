@@ -1,6 +1,6 @@
 import logging
 from decimal import Decimal
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 
@@ -72,6 +72,7 @@ class HedgeStrategy(StrategyPyBase):
         :param status_report_interval: Interval to report status.
         """
         super().__init__()
+        self._config_map = config_map
         self._hedge_market_pairs = hedge_market_pairs
         self._market_pairs = market_pairs
         self._hedge_ratio = config_map.hedge_ratio
@@ -433,27 +434,76 @@ class HedgeStrategy(StrategyPyBase):
         """
         return 1 + self._slippage if is_buy else 1 - self._slippage
 
-    def calculate_hedge_price_and_amount(self, is_buy: bool, value_to_hedge: Decimal) -> Tuple[Decimal, Decimal]:
+    def get_relevant_news(self, market_pair: MarketTradingPairTuple):
+        if not self._config_map.news_risk_controls_enabled:
+            return []
+        if not hasattr(market_pair.market, "get_active_news"):
+            return []
+        return market_pair.market.get_active_news(
+            symbols=[market_pair.trading_pair],
+            before_seconds=self._config_map.news_pause_before_seconds,
+            after_seconds=self._config_map.news_pause_after_seconds,
+            min_severity=self._config_map.news_min_severity,
+        )
+
+    def get_news_risk_adjustments(self, market_pair: MarketTradingPairTuple) -> Tuple[bool, Decimal, Decimal, List[Any]]:
+        news_events = self.get_relevant_news(market_pair)
+        if len(news_events) == 0:
+            return False, Decimal("1"), Decimal("1"), []
+        if self._config_map.news_disable_hedging_during_risk:
+            return True, Decimal("0"), self._config_map.news_slippage_multiplier, news_events
+        return (
+            False,
+            self._config_map.news_reduce_order_size_multiplier,
+            self._config_map.news_slippage_multiplier,
+            news_events,
+        )
+
+    def calculate_hedge_price_and_amount(
+        self,
+        is_buy: bool,
+        value_to_hedge: Decimal,
+        market_pair: Optional[MarketTradingPairTuple] = None,
+        amount_multiplier: Decimal = Decimal("1"),
+        slippage_multiplier: Decimal = Decimal("1"),
+    ) -> Tuple[Decimal, Decimal]:
         """
         Calculate the price and amount to hedge.
         :params is_buy: The direction of the hedge.
         :params value_to_hedge: The value to hedge.
         :returns: The price and amount to hedge.
         """
-        price = self._hedge_market_pair.get_mid_price()
-        amount = value_to_hedge / price
-        price = price * self.get_slippage_ratio(is_buy)
-        trading_pair = self._hedge_market_pair.trading_pair
-        quantized_price = self._hedge_market_pair.market.quantize_order_price(trading_pair, price)
-        quantized_amount = self._hedge_market_pair.market.quantize_order_amount(trading_pair, amount)
+        market_pair = market_pair or self._hedge_market_pair
+        price = market_pair.get_mid_price()
+        amount = (value_to_hedge / price) * amount_multiplier
+        effective_slippage = self._slippage * slippage_multiplier
+        price = price * (1 + effective_slippage if is_buy else 1 - effective_slippage)
+        trading_pair = market_pair.trading_pair
+        quantized_price = market_pair.market.quantize_order_price(trading_pair, price)
+        quantized_amount = market_pair.market.quantize_order_amount(trading_pair, amount)
         return quantized_price, quantized_amount
 
     def hedge_by_value(self) -> None:
         """
         The main process of the strategy for value mode = True.
         """
+        should_pause, amount_multiplier, slippage_multiplier, news_events = self.get_news_risk_adjustments(
+            self._hedge_market_pair
+        )
+        if should_pause:
+            self.logger().info("Skipping hedge_by_value due to active simulation news risk controls.")
+            self._status_messages.append(
+                f"Hedge paused by news risk controls: {[event.title for event in news_events]}"
+            )
+            return
         is_buy, value_to_hedge = self.get_hedge_direction_and_value()
-        price, amount = self.calculate_hedge_price_and_amount(is_buy, value_to_hedge)
+        price, amount = self.calculate_hedge_price_and_amount(
+            is_buy,
+            value_to_hedge,
+            market_pair=self._hedge_market_pair,
+            amount_multiplier=amount_multiplier,
+            slippage_multiplier=slippage_multiplier,
+        )
         if amount == Decimal("0"):
             self.logger().debug("No hedge required.")
             self._status_messages.append("No hedge required.")
@@ -504,7 +554,18 @@ class HedgeStrategy(StrategyPyBase):
                 self.logger().debug("No hedge required for %s.", asset)
                 self._status_messages.append(f"No hedge required for {asset}.")
                 continue
-            price = hedge_market.get_mid_price() * self.get_slippage_ratio(is_buy)
+            should_pause, amount_multiplier, slippage_multiplier, news_events = self.get_news_risk_adjustments(
+                hedge_market
+            )
+            if should_pause:
+                self.logger().info("Skipping hedge_by_amount for %s due to active simulation news risk controls.", asset)
+                self._status_messages.append(
+                    f"Hedge paused by news risk controls for {asset}: {[event.title for event in news_events]}"
+                )
+                continue
+            amount_to_hedge *= amount_multiplier
+            effective_slippage = self._slippage * slippage_multiplier
+            price = hedge_market.get_mid_price() * (1 + effective_slippage if is_buy else 1 - effective_slippage)
             self.logger().info(
                 "Hedge by amount. Mid price: %s Hedge direction: %s. Hedge price: %s. Hedge amount: %s",
                 hedge_market.get_mid_price(), is_buy, price, amount_to_hedge

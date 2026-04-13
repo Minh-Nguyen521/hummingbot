@@ -34,6 +34,10 @@ async def start(self):
         rebalance_target_pnl_pct = c_map.get("rebalance_target_pnl_pct").value / Decimal("100")
         rebalance_heavy_side_size_mult = c_map.get("rebalance_heavy_side_size_mult").value
         rebalance_light_side_size_mult = c_map.get("rebalance_light_side_size_mult").value
+        news_pre_window_seconds = c_map.get("news_pre_window_seconds").value or 2.0
+        news_price_shift_pct = (c_map.get("news_price_shift_pct").value or Decimal("0.1")) / Decimal("100")
+        news_flow_window_seconds = c_map.get("news_flow_window_seconds").value or 30.0
+        news_flow_skew_mult = c_map.get("news_flow_skew_mult").value or Decimal("2.0")
 
         trading_pair: str = raw_trading_pair
         base, quote = trading_pair.split("-")
@@ -73,6 +77,10 @@ async def start(self):
             rebalance_target_pnl_pct=rebalance_target_pnl_pct,
             rebalance_heavy_side_size_mult=rebalance_heavy_side_size_mult,
             rebalance_light_side_size_mult=rebalance_light_side_size_mult,
+            news_pre_window_seconds=news_pre_window_seconds,
+            news_price_shift_pct=news_price_shift_pct,
+            news_flow_window_seconds=news_flow_window_seconds,
+            news_flow_skew_mult=news_flow_skew_mult,
             hb_app_notification=True,
         )
     except Exception as e:

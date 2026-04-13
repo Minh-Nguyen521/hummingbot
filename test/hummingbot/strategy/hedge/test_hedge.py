@@ -11,6 +11,7 @@ from hummingbot.connector.test_support.mock_paper_exchange import MockPaperExcha
 from hummingbot.core.clock import Clock
 from hummingbot.core.clock_mode import ClockMode
 from hummingbot.core.data_type.common import PositionMode, PositionSide
+from hummingbot.connector.derivative.exchange_sim.news_types import NewsEvent
 from hummingbot.strategy.hedge.hedge import HedgeStrategy
 from hummingbot.strategy.hedge.hedge_config_map_pydantic import HedgeConfigMap
 from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
@@ -214,3 +215,67 @@ class HedgeConfigMapPydanticTest(unittest.TestCase):
             offsets = self.offsets,
         )
         self.assertIsNone(strategy.hedge_by_amount())
+
+    def test_hedge_by_value_pauses_during_active_news_when_configured(self):
+        self.config_map.news_risk_controls_enabled = True
+        self.config_map.news_disable_hedging_during_risk = True
+        self.markets["binance_perpetual"].get_active_news = lambda **kwargs: [
+            NewsEvent(
+                id="risk",
+                title="Scheduled CPI release",
+                timestamp=self.start_timestamp,
+                severity="critical",
+                symbols=("BTC-USDT",),
+                source="fixture",
+            )
+        ]
+        strategy = HedgeStrategy(
+            config_map=self.config_map,
+            hedge_market_pairs=[self.market_trading_pairs["binance_perpetual"]],
+            market_pairs=[self.market_trading_pairs["kucoin"], self.market_trading_pairs["binance"]],
+            offsets=self.offsets,
+        )
+        strategy.get_order_candidates = strategy.get_perpetual_order_candidates
+        self.clock.add_iterator(strategy)
+        self.clock.add_iterator(strategy.order_tracker)
+        strategy.order_tracker.start(self.clock)
+        strategy.start(self.clock, self.start_timestamp)
+
+        strategy.hedge_by_value()
+
+        self.assertEqual(0, len(strategy.active_orders))
+        self.assertTrue(any("Hedge paused by news risk controls" in message for message in strategy._status_messages))
+
+    def test_hedge_by_value_adjusts_amount_and_slippage_during_active_news(self):
+        self.config_map.slippage = Decimal("-0.2")
+        self.config_map.news_risk_controls_enabled = True
+        self.config_map.news_reduce_order_size_multiplier = Decimal("0.5")
+        self.config_map.news_slippage_multiplier = Decimal("2")
+        self.markets["binance_perpetual"].get_active_news = lambda **kwargs: [
+            NewsEvent(
+                id="risk",
+                title="Scheduled CPI release",
+                timestamp=self.start_timestamp,
+                severity="high",
+                symbols=("BTC-USDT",),
+                source="fixture",
+            )
+        ]
+        strategy = HedgeStrategy(
+            config_map=self.config_map,
+            hedge_market_pairs=[self.market_trading_pairs["binance_perpetual"]],
+            market_pairs=[self.market_trading_pairs["kucoin"], self.market_trading_pairs["binance"]],
+            offsets=self.offsets,
+        )
+        strategy.get_order_candidates = strategy.get_perpetual_order_candidates
+        self.clock.add_iterator(strategy)
+        self.clock.add_iterator(strategy.order_tracker)
+        strategy.order_tracker.start(self.clock)
+        strategy.start(self.clock, self.start_timestamp)
+
+        strategy.hedge_by_value()
+
+        self.assertEqual(1, len(strategy.active_orders))
+        _, order = strategy.active_orders[0]
+        self.assertEqual(Decimal("140"), order.price)
+        self.assertEqual(Decimal("0.75"), order.quantity)

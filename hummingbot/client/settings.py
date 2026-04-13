@@ -183,7 +183,22 @@ class ConnectorSetting(NamedTuple):
             and self.config_keys is not None
             and not isinstance(self.config_keys, Dict)
         ):
-            for optional_field in ("ref_price", "master_account_id", "long_account_id", "short_account_id"):
+            for optional_field in (
+                "ref_price",
+                "master_account_id",
+                "long_account_id",
+                "short_account_id",
+                "news_enabled",
+                "news_poll_interval",
+                "news_lookahead_window",
+                "news_replay_mode",
+                "news_feed_path",
+                "news_endpoint",
+                "news_volatility_enabled",
+                "news_impact_duration",
+                "news_impact_multiplier",
+                "news_spread_multiplier",
+            ):
                 attr_name = f"{self.name}_{optional_field}"
                 if hasattr(self.config_keys, attr_name):
                     params[attr_name] = getattr(self.config_keys, attr_name)
